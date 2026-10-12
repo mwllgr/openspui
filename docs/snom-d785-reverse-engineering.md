@@ -504,18 +504,48 @@ Related U-Boot env / cmdline switches handled by `getStartMode()`: **`forceshell
 **`forceshell`** on the kernel command line force Shell mode; `updatetesturl=<url>` forces an update
 test; `killproductionmode=yes` clears production mode.
 
-### 10.2 Getting the first shell (bootstrap, no prior access)
+### 10.2 Getting initial root access (bootstrap)
 
-`fw_setenv`/development mode needs a shell, and the prompt above only appears once `development=yes` is
-set — so the first time you need one of:
+Development mode (§10.1) needs a shell to set `fw_setenv`, and its boot prompt only appears once
+`development=yes` is set — so for the *first* root login you need one of the following. In all cases the
+payoff is the same: an `sshd` running, into which you log in as `root` with **no password**.
 
-- **U-Boot serial console** — interrupt boot on `/dev/ttyS0` and set the variable at the bootloader
-  prompt (`setenv development yes; saveenv`), or boot once with `forceshell`.
-- **OpenVPN `up`-script** (no console needed) — snom phones honour `script-security 2` and run an
-  OpenVPN `up` script. Provision the phone to connect to an OpenVPN server you control (client certs
-  under `/openvpn/*`) with a profile containing `script-security 2` and `up /usr/local/bin/startsshd`
-  (the stock on-device helper). The phone starts `sshd` when the tunnel comes up; log in over the
-  tunnel, then `fw_setenv development yes` to persist.
+**Method 1 — OpenVPN `up`-script (no physical access).** The standard way in without opening the phone.
+It relies on three stock facts:
+
+1. the phone ships a built-in **OpenVPN** client (`/usr/sbin/openvpn`), and OpenVPN run with
+   `script-security 2` executes the config's `up` script;
+2. there is a stock helper **`/usr/local/bin/startsshd`** whose whole job is to bring up networking
+   (DHCP on `eth0`), generate an SSH host key if missing, and run **`/usr/sbin/sshd`** (it also pins a
+   static IP and disables the watchdog);
+3. `root` has an empty password and `sshd_config` allows it (§10 intro).
+
+So: stand up an OpenVPN server you control, and install on the phone a client profile whose config
+contains `script-security 2` and `up /usr/local/bin/startsshd`. When the phone brings the tunnel up it
+runs `startsshd`, `sshd` starts, and you SSH in as `root`. The VPN profile is a small tar of
+`ca.crt` + `client.crt` + `client.key` + the OpenVPN config file (the phone expects the certs at
+`/openvpn/*`); it is installed through the phone's **web admin** (VPN settings) or via **auto-
+provisioning**. A minimal lab is just an OpenVPN server plus a web server to host the profile. This is
+the well-documented snom root-access technique (see the coredump.ch / encrypted.at write-ups).
+
+**Method 2 — serial console / U-Boot (physical access).** Attach a 3.3 V TTL-serial adapter to the
+debug UART (console `/dev/ttyS0`, **9600 8N1**, see §9.4). Interrupt the boot to reach the U-Boot prompt
+and set **`development=yes`** — this is the recommended flag: the phone still boots the phone
+application (after the 15 s prompt) *and* starts `sshd`, and it persists across reboots/updates:
+
+```
+setenv development yes
+saveenv
+boot
+```
+
+> **Avoid `forceshell`.** It also yields a root shell, but it boots the phone **into a bare shell
+> instead of the phone application** — so the phone does not work as a phone while it is set. Use it
+> only for one-off recovery and clear it afterwards. Prefer `development=yes`, which gives SSH *and*
+> keeps the phone usable.
+
+With Method 1, after your first login run `fw_setenv development yes` to persist SSH the same way
+(§10.1).
 
 ## 11. Firmware image format (decrypt / encrypt / sign)
 
