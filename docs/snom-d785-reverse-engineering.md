@@ -547,6 +547,105 @@ boot
 With Method 1, after your first login run `fw_setenv development yes` to persist SSH the same way
 (§10.1).
 
+### 10.3 Worked example for Method 1 (quick root)
+
+A minimal lab: an OpenVPN server + a web server to host the client profile.
+
+**`docker-compose.yml`:**
+
+```yaml
+services:
+  openvpn:
+    image: alpine:3
+    command: sh -c "apk add --no-cache openvpn && openvpn --config /etc/openvpn/server.conf"
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    ports: ["1194:1194/udp"]
+    volumes: ["./openvpn:/etc/openvpn"]
+    restart: unless-stopped
+  web:                                   # hosts the profile tarball for the phone to fetch
+    image: nginx:alpine
+    ports: ["8080:80"]
+    volumes: ["./www:/usr/share/nginx/html:ro"]
+    restart: unless-stopped
+```
+
+**Generate the PKI** once with **easy-rsa** (OpenVPN's cert tool). Install it from your package manager
+— `apt install easy-rsa` (Debian/Ubuntu), `apk add easy-rsa` (Alpine), `dnf install easy-rsa` (Fedora),
+`brew install easy-rsa` (macOS) — or download it from <https://github.com/OpenVPN/easy-rsa/releases>.
+The CLI is `easyrsa` (on Debian it lives at `/usr/share/easy-rsa/easyrsa`; copy that directory somewhere
+writable and run it there). Then produce `ca.crt`, `server.crt/.key`, `dh.pem`, and a client
+`client.crt/.key` under `./pki/`:
+
+```sh
+easyrsa init-pki
+easyrsa build-ca nopass
+easyrsa gen-dh
+easyrsa build-server-full server nopass
+easyrsa build-client-full client nopass
+```
+
+(Copy the resulting `pki/` into `./openvpn/pki/` so the server config below can find it.)
+
+**`./openvpn/server.conf`:**
+
+```
+port 1194
+proto udp
+dev tun
+ca   /etc/openvpn/pki/ca.crt
+cert /etc/openvpn/pki/server.crt
+key  /etc/openvpn/pki/server.key
+dh   /etc/openvpn/pki/dh.pem
+topology subnet
+server 10.8.0.0 255.255.255.0
+keepalive 10 60
+persist-key
+persist-tun
+verb 3
+```
+
+**The client profile — `vpn.cnf`** (the two last lines are what gets you root; set `remote` to your
+server's IP):
+
+```
+client
+dev tun
+proto udp
+remote YOUR_SERVER_IP 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+ca   /openvpn/ca.crt
+cert /openvpn/client.crt
+key  /openvpn/client.key
+remote-cert-tls server
+ping 10
+ping-restart 60
+verb 3
+script-security 2
+up /usr/local/bin/startsshd
+```
+
+**Package the profile** as the flat tar the phone expects (note the cert file names referenced by
+`vpn.cnf` map to `/openvpn/*` on the phone), and drop it where the web server serves it:
+
+```sh
+cp pki/ca.crt pki/issued/client.crt pki/private/client.key .
+tar cf vpnclient.tar ca.crt client.crt client.key vpn.cnf
+cp vpnclient.tar ./www/
+```
+
+**On the phone:** point its VPN configuration at the tarball (e.g. the VPN settings in the web admin, or
+auto-provisioning) — a URL like `http://YOUR_SERVER_IP:8080/vpnclient.tar`. When the tunnel comes up the
+phone runs `up /usr/local/bin/startsshd` and `sshd` starts. Then:
+
+```sh
+ssh root@10.8.0.2      # the phone's VPN-tunnel address (or its LAN IP); empty password
+fw_setenv development yes   # persist SSH (survives reboots/updates), then reboot
+```
+
 ## 11. Firmware image format (decrypt / encrypt / sign)
 
 A firmware `.bin` is, from the start of the file:
