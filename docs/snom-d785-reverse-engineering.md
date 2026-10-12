@@ -12,6 +12,26 @@ with concrete examples.
   `/dev/halaudio`. Those are held open exclusively by the on-board **`media_daemon`** process. Audio is
   controlled by talking to `media_daemon` over its **LPCP** socket — you do not open the DSP yourself.
 
+### Hardware at a glance
+
+Values marked *(measured)* are read directly from the device (`/proc/cpuinfo`, `/proc/meminfo`,
+`/proc/mtd`, `/sys/class/graphics`, `/proc/net/dev`); the rest are standard product specifications.
+
+| Component       | Detail |
+|-----------------|--------|
+| SoC             | Broadcom **BCMRing (BCM11107)**, ARM11 (**ARMv6**), single core, ~500 MHz *(measured: BogoMIPS 498; Hardware `snomD785`, Revision `11107`)* |
+| FPU             | **none** — no VFP; **soft-float** *(measured: CPU features `swp half thumb fastmult edsp java`)* |
+| RAM             | **128 MB** DDR *(measured: `MemTotal` ≈ 122.6 MB usable)* |
+| Flash           | **128 MB** NAND, JFFS2 *(measured: NAND chip `0xef 0xf1`, 128 MiB; rootfs partition ≈ 109 MB — see §9.2)* |
+| Main display    | 4.3″ color TFT, **480 × 272, 32 bpp** *(measured: `fb0` `BCMRING_FB`, 480×544 virtual = double-buffered)* |
+| Side display    | monochrome SPI, **254 × 100, 1 bpp** *(measured: `fb1` `snom_fb2`)* — the self-labeling function-key display |
+| Function keys   | **6** physical keys with dual-colour (red/green) LEDs, **paged** on the side display (up to 24 logical keys) |
+| Ethernet        | **2 × 10/100/1000** (integrated switch: network + PC port), 802.1Q VLAN *(measured: `eth0` + `eth0.70`, PHYs `phy0`/`phy1`)* |
+| USB             | 1 × USB host (headset / EHS / Wi-Fi or BT dongle) |
+| Wireless        | Bluetooth; Wi-Fi via USB dongle |
+| Power           | PoE (IEEE 802.3af) or external PSU |
+| Audio           | wideband (HD) handset + full-duplex hands-free speakerphone |
+
 A minimal replacement application therefore needs to: draw to two framebuffers, drive the LEDs, read
 the keypad (including the hook), and drive audio/RTP through `media_daemon`. Each is below.
 
@@ -369,15 +389,22 @@ Linux 2.6.27 (BCMRing)
 
 ### 9.2 Flash layout (MTD / JFFS2)
 
-The on-board flash is partitioned into MTD devices; the writable filesystems are **JFFS2**:
+The on-board flash is a **128 MiB NAND**, partitioned into MTD devices (erase block 128 KiB); the
+writable filesystems are **JFFS2**. The actual `/proc/mtd`:
 
-| Partition | Device        | Contents |
-|-----------|---------------|----------|
-| U-Boot    | `mtd1`        | bootloader |
-| Rescue FS | `mtd4`        | minimal fallback root filesystem (recovery / failed-update boot) |
-| Protected | `mtd5`        | **persistent** data that survives firmware updates (configuration, certificates, provisioning) — mounted read-only at `/protected` |
-| Kernel    | `mtd6`        | Linux kernel image |
-| Root FS   | `mtd7`        | main root filesystem (the application image) |
+| Device | Label          | Size    | Contents |
+|--------|----------------|---------|----------|
+| `mtd0` | `bootloader`   | 640 KiB | first-stage boot |
+| `mtd1` | `uboot`        | 896 KiB | U-Boot |
+| `mtd2` | `ubootenv`     | 512 KiB | **U-Boot environment** (where `fw_setenv`/`fw_printenv` read/write — §10) |
+| `mtd3` | `rescuekernel` | 4 MiB   | recovery kernel |
+| `mtd4` | `rescuefs`     | 8 MiB   | recovery / failed-update root filesystem |
+| `mtd5` | `data`         | 768 KiB | **persistent** config/certificates/provisioning — mounted read-only at `/protected`, preserved across updates |
+| `mtd6` | `kernel`       | 4 MiB   | Linux kernel |
+| `mtd7` | `rootfs`       | ≈109 MiB| main root filesystem (the application image) |
+
+(System/"advanced" updates use `rescuefs` + the dual rootfs slots selected by the U-Boot `rootfsvol`
+variable — see §9.8.)
 
 ### 9.3 init and `/etc/init.d/rcS`
 
@@ -728,7 +755,42 @@ the integrity check that would otherwise notice:
 > This replaces the device's firmware trust anchor with your own and only applies to a phone you own;
 > it is the standard way to run custom/open-source firmware on this hardware.
 
-## 12. Interfaces that are not available
+## 12. Cross-compiling C for the phone
+
+The target is **ARMv6, soft-float (no VFP, no NEON), EABI**, with an old kernel (2.6.27) and old system
+libraries. The simplest, most reliable approach is to build **statically against musl**, which sidesteps
+the ancient on-device glibc entirely.
+
+Use a musl cross toolchain for **`arm-linux-musleabi`** — the soft-float EABI target. **Do not** use
+`arm-linux-musleabihf` (hard-float); this CPU has no FPU and such a binary will not run. Prebuilt
+toolchains come from the musl-cross-make project (e.g. the `arm-linux-musleabi` tarball from
+<https://musl.cc>), or you can build one with musl-cross-make.
+
+```sh
+# static, soft-float, ARMv6
+arm-linux-musleabi-gcc -static -march=armv6 -Os -s -o myapp myapp.c
+
+file myapp          # -> ELF 32-bit LSB executable, ARM, EABI5, statically linked
+scp myapp root@<phone>:/tmp/ && ssh root@<phone> /tmp/myapp
+```
+
+Flags that matter: `-static` (no dependency on the device's libraries); `-march=armv6` (don't target
+v7/NEON/hard-float); soft-float is implied by the `musleabi` target. `-Os -s` keep the binary small
+(RAM/flash are limited — see "Hardware at a glance"). Add `-marm` if you hit Thumb-interworking issues.
+
+No local toolchain install (Docker):
+
+```sh
+docker run --rm -v "$PWD:/src" -w /src muslcc/x86_64:arm-linux-musleabi \
+    arm-linux-musleabi-gcc -static -march=armv6 -Os -s -o myapp myapp.c
+```
+
+Extra libraries (TLS/crypto, codecs, …) should likewise be cross-built **static** and linked in.
+Dynamic linking against the stock on-device libraries is possible but awkward — it needs a sysroot
+copied from the phone's root filesystem and matching old glibc versions — so static musl is strongly
+recommended.
+
+## 13. Interfaces that are not available
 
 - **Wideband codecs (e.g. G.722):** require the `STREAM_SETUP` codec-table descriptor plus the DSP
   sample rate (16 kHz); the binary form of that descriptor is not publicly documented.
