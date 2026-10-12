@@ -26,7 +26,7 @@ Values marked *(measured)* are read directly from the device (`/proc/cpuinfo`, `
 | Main display    | 4.3″ color TFT, **480 × 272, 32 bpp** *(measured: `fb0` `BCMRING_FB`, 480×544 virtual = double-buffered)* |
 | Side display    | monochrome SPI, **254 × 100, 1 bpp** *(measured: `fb1` `snom_fb2`)* — the self-labeling function-key display |
 | Function keys   | **6** physical keys with dual-colour (red/green) LEDs, **paged** on the side display (up to 24 logical keys) |
-| Ethernet        | **2 × 10/100/1000** (integrated switch: network + PC port), 802.1Q VLAN *(measured: `eth0` + `eth0.70`, PHYs `phy0`/`phy1`)* |
+| Ethernet        | **2 × 10/100/1000** (integrated switch: network + PC port), 802.1Q VLAN tagging *(measured: `eth0`, PHYs `phy0`/`phy1`)* |
 | USB             | 1 × USB host (headset / EHS / Wi-Fi or BT dongle) |
 | Wireless        | Bluetooth; Wi-Fi via USB dongle |
 | Power           | PoE (IEEE 802.3af) or external PSU |
